@@ -1,5 +1,6 @@
 #include "GpgAgentHandler.h"
 #include "Log.h"
+#include <cctype>
 #include <cstdio>
 #include <iostream>
 #include <memory>
@@ -8,6 +9,7 @@
 
 using namespace std;
 using namespace boost::process;
+using std::placeholders::_1;
 namespace KeePassPinentry {
 GpgAgentHandler::GpgAgentHandler() {
     _pinentry =
@@ -22,10 +24,23 @@ void GpgAgentHandler::serveAgent() {
     t.join();
 }
 
+string capitalize(string str) {
+    for (char &c : str)
+        c = toupper(c);
+    return str;
+}
+
 void GpgAgentHandler::handleInput() {
     string cmd;
     while (getline(cin, cmd)) {
         _debug_cerr << "agent: " << cmd << '\n';
+        if (const auto &p = _inputHandler.find(
+                capitalize(cmd.substr(0, cmd.find_first_of(' '))));
+            p != _inputHandler.end()) {
+            bool needProxy = p->second(cmd);
+            if (!needProxy)
+                continue;
+        }
         _pinentryStdin << cmd << endl;
     }
 }
@@ -37,4 +52,10 @@ void GpgAgentHandler::handleOutput() {
         cout << resp << endl;
     }
 }
+
+bool GpgAgentHandler::handleSetKeyInfo(const string &cmd) {
+    _keygrip.assign(cmd, sizeof("SETKEYINFO"));
+    return true;
+}
+bool GpgAgentHandler::handleGetPin(const string &cmd) { return true; }
 } // namespace KeePassPinentry
