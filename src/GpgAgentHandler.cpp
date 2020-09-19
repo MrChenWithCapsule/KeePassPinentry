@@ -9,9 +9,11 @@
 
 using namespace std;
 using namespace boost::process;
+using namespace boost::asio;
 using std::placeholders::_1;
 namespace KeePassPinentry {
-GpgAgentHandler::GpgAgentHandler() {
+GpgAgentHandler::GpgAgentHandler(io_context &ioContext)
+    : _client{ioContext, {}} {
     _pinentry =
         make_unique<child>(search_path("pinentry"), std_out > _pinentryStdout,
                            std_err > stderr, std_in < _pinentryStdin);
@@ -54,8 +56,19 @@ void GpgAgentHandler::handleOutput() {
 }
 
 bool GpgAgentHandler::handleSetKeyInfo(const string &cmd) {
-    _keygrip.assign(cmd, sizeof("SETKEYINFO"));
+    if (cmd == "SETKEYINFO --clear")
+        _keygrip.clear();
+    else
+        _keygrip.assign(cmd, sizeof("SETKEYINFO n/") - 1);
     return true;
 }
-bool GpgAgentHandler::handleGetPin(const string &cmd) { return true; }
+bool GpgAgentHandler::handleGetPin(const string &cmd) {
+    if (_keygrip.empty())
+        return true;
+    string p = _client.getPassphrase(_keygrip);
+    if (p.empty())
+        return true;
+    cout << "D " << p << "\nOK\n";
+    return false;
+}
 } // namespace KeePassPinentry

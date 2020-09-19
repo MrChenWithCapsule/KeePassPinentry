@@ -7,6 +7,9 @@
     4. [ ] Fix pinentry-curses asking for tty
 2. [ ] Implement find passphrase in database for requested key
     1. [ ] Implement communication between KeePassPinentry and KeePass on Windows (Named Pipe)
-    2. [ ] Implement communication on Unix (Unix Socket)
-    3. [ ] Implement find passphrase using information given by gpg-agent
+    2. [x] Implement communication on Unix (Unix Socket)
+    3. [x] Implement find passphrase using information given by gpg-agent
+    4. [ ] Implement save database hash and private key
+    5. [ ] Implement change passphrase
+    6. [ ] Implement generate passphrase
 3. [ ] Add tests

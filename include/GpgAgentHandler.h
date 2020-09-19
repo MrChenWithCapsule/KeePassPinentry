@@ -1,6 +1,9 @@
 #ifndef KEEPASSPINENTRY_GPGAGENTHANDlER_H
 #define KEEPASSPINENTRY_GPGAGENTHANDlER_H
 
+#include "KeePassXCClient.h"
+
+#include <boost/asio.hpp>
 #include <boost/process.hpp>
 #include <functional>
 #include <map>
@@ -10,7 +13,7 @@
 namespace KeePassPinentry {
 class GpgAgentHandler {
   public:
-    GpgAgentHandler();
+    GpgAgentHandler(boost::asio::io_context &ioContext);
     void serveAgent();
 
   private:
@@ -25,6 +28,7 @@ class GpgAgentHandler {
     std::unique_ptr<boost::process::child> _pinentry;
     boost::process::opstream _pinentryStdin;
     boost::process::ipstream _pinentryStdout;
+    KeePassXCClient _client;
 
     const std::map<std::string, std::function<InputHandlerType>> _inputHandler{
         {"SETKEYINFO", std::bind(&GpgAgentHandler::handleSetKeyInfo, this,
