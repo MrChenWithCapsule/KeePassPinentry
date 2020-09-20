@@ -16,6 +16,7 @@ using namespace boost::asio;
 using namespace boost::property_tree;
 using KeyType = KeePassPinentry::KeePassXCClient::KeyType;
 using DataType = KeyType;
+namespace asio = boost::asio;
 
 struct Actions {
     static constexpr char changePublicKeys[] = "change-public-keys";
@@ -99,7 +100,7 @@ KeePassXCClient::KeePassXCClient(io_context &ioContext,
     _privateKey.resize(crypto_kx_SECRETKEYBYTES);
     _publicKey.resize(crypto_kx_PUBLICKEYBYTES);
     crypto_kx_keypair(_publicKey.data(), _privateKey.data());
-    _debug_cerr << "generated key pair";
+    _debug_cerr << "generated key pair\n";
 
     connectSocket();
     handShake();
@@ -145,11 +146,11 @@ ptree KeePassXCClient::transact(const ptree &data) {
     write(_socket, buffer(s));
     _debug_cerr << "sent data of length " << s.length() << '\n';
 
-    string buf;
-    read(_socket, buffer(buf));
-    _debug_cerr << "read data of length " << buf.length() << '\n';
+    asio::streambuf buf;
+    read(_socket, buf);
+    _debug_cerr << "read data of length " << buf.size() << '\n';
     ptree msg;
-    istringstream sst{buf};
+    istream sst{ &buf };
     read_json(sst, msg);
 
     return msg;
@@ -187,8 +188,8 @@ ptree KeePassXCClient::transact_entrypted(const ptree &data) {
     }
 
     // receive end decrypt data
-    DataType edata;
-    read(_socket, buffer(edata));
+    asio::streambuf edata;
+    read(_socket, edata);
     _debug_cerr << "read encrypted data of length " << edata.size() << '\n';
     // increment nonce
     sodium_increment(nonce.data(), nonce.size());
@@ -196,7 +197,7 @@ ptree KeePassXCClient::transact_entrypted(const ptree &data) {
         '\0');
     if (-1 ==
         crypto_box_open_easy(reinterpret_cast<unsigned char *>(ddata.data()),
-                             edata.data(), edata.size(), nonce.data(),
+                             reinterpret_cast<const unsigned char*>(edata.data().data()), edata.size(), nonce.data(),
                              _serverPublicKey.data(), _privateKey.data())) {
         _debug_cerr << "authentication failed\n";
         throw runtime_error{"authentication failed"};
@@ -275,8 +276,8 @@ void KeePassXCClient::connectSocket() {
         _debug_cerr << "cannot find environment variable USERNAME\n";
         throw runtime_error{ "cannot find environment variable USERNAME" };
     }
-    string path = string{ "\\\\.\\npipe\\keepassxc\\" } + user_name +'\\'+ socket_name;
-    _npipe = CreateFileA(path.c_str(), GENERIC_ALL, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    string path = string{ "\\\\.\\pipe\\keepassxc\\" } + user_name +'\\'+ socket_name;
+    _npipe = CreateFileA(path.c_str(), GENERIC_ALL, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
     if (_npipe == INVALID_HANDLE_VALUE) {
         _debug_cerr << "cannot open named pipe\n";
         throw runtime_error{ "cannot open named pipe" };
