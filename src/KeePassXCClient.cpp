@@ -67,8 +67,8 @@ static KeyType base64Decode(const string &str) {
     return ret;
 }
 static string base64Encode(const KeyType &bytes) {
-    string ret('\0', sodium_base64_ENCODED_LEN(bytes.size(), base64Variant));
-    sodium_bin2base64(ret.data(), ret.length(), bytes.data(), bytes.size(),
+    string ret(sodium_base64_ENCODED_LEN(bytes.size(), base64Variant), '\0');
+    sodium_bin2base64(data(ret), ret.length(), bytes.data(), bytes.size(),
                       base64Variant);
     return ret;
 }
@@ -85,12 +85,13 @@ namespace KeePassPinentry {
 KeePassXCClient::KeePassXCClient(io_context &ioContext,
                                  string identificationKey)
     : _ioContext{ioContext}, _socket{ioContext},
-      _identificationKey{identificationKey}, _clientID{generateClientID()} {
+      _b64IdentificationKey{identificationKey}, _b64ClientID{
+                                                    generateClientID()} {
     // if I don't have an identification, generate one
-    if (_identificationKey.empty()) {
+    if (_b64IdentificationKey.empty()) {
         KeyType bkey(crypto_box_PUBLICKEYBYTES);
         randombytes_buf(bkey.data(), bkey.size());
-        _identificationKey = base64Encode(bkey);
+        _b64IdentificationKey = base64Encode(bkey);
         _debug_cerr << "generated identification key\n";
     }
 
@@ -113,9 +114,9 @@ string KeePassXCClient::getPassphrase(const string &keygrip) {
         msg.add(Keys::action, Actions::getLogins);
         msg.add(Keys::url, "gpg://" + keygrip);
         ptree keys, key;
-        key.add(Keys::id, _databaseHash);
-        keys.add("", key);
-        msg.add(Keys::keys, keys);
+        key.add(Keys::id, _b64DatabaseHash);
+        keys.add_child("", key);
+        msg.add_child(Keys::keys, keys);
         resp = transact_entrypted(msg);
     }
 
@@ -156,16 +157,19 @@ ptree KeePassXCClient::transact_entrypted(const ptree &data) {
     KeyType nonce = generateNonce();
     box.add(Keys::action, data.get<string>(Keys::action));
     box.add(Keys::nonce, base64Encode(nonce));
-    box.add(Keys::clientID, _clientID);
+    box.add(Keys::clientID, _b64ClientID);
     {
         ostringstream sst;
         write_json(sst, data);
         string s = sst.str();
         DataType edata(crypto_box_MACBYTES + s.length());
-        crypto_box_easy(edata.data(),
-                        reinterpret_cast<unsigned char *>(s.data()), s.length(),
-                        nonce.data(), _privateKey.data(),
-                        _serverPublicKey.data());
+        if (0 != crypto_box_easy(edata.data(),
+                                 reinterpret_cast<unsigned char *>(s.data()),
+                                 s.length(), nonce.data(), _privateKey.data(),
+                                 _serverPublicKey.data())) {
+            _debug_cerr << "encryption failed\n";
+            throw runtime_error{"encryption failed"};
+        }
         box.add(Keys::message, base64Encode(edata));
     }
 
@@ -207,8 +211,8 @@ void KeePassXCClient::changePublicKey() {
         ptree msg;
         msg.add(Keys::action, Actions::changePublicKeys);
         msg.add(Keys::publicKey, base64Encode(_publicKey));
-        msg.add(Keys::nonce, generateNonce());
-        msg.add(Keys::clientID, _clientID);
+        msg.add(Keys::nonce, base64Encode(generateNonce()));
+        msg.add(Keys::clientID, _b64ClientID);
         serverMsg = transact(msg);
     }
 
@@ -227,7 +231,7 @@ void KeePassXCClient::associate() {
         ptree msg;
         msg.add(Keys::action, Actions::getDatabasehash);
         ptree resp = transact_entrypted(msg);
-        _databaseHash = resp.get<string>(Keys::hash);
+        _b64DatabaseHash = resp.get<string>(Keys::hash);
     }
 
     // test associate
@@ -235,8 +239,8 @@ void KeePassXCClient::associate() {
         _debug_cerr << "test associate\n";
         ptree msg;
         msg.add(Keys::action, Actions::testAssociate);
-        msg.add(Keys::id, _databaseHash);
-        msg.add(Keys::key, base64Encode(_identificationKey));
+        msg.add(Keys::id, _b64DatabaseHash);
+        msg.add(Keys::key, _b64IdentificationKey);
         ptree resp = transact_entrypted(msg);
         if (resp.get<string>(Keys::success) == SuccessCodes::success) {
             _debug_cerr << "already associated\n";
@@ -249,8 +253,8 @@ void KeePassXCClient::associate() {
         _debug_cerr << "associate\n";
         ptree msg;
         msg.add(Keys::action, Actions::associate);
-        msg.add(Keys::publicKey, _publicKey);
-        msg.add(Keys::idKey, _identificationKey);
+        msg.add(Keys::publicKey, base64Encode(_publicKey));
+        msg.add(Keys::idKey, _b64IdentificationKey);
         ptree resp = transact_entrypted(msg);
         if (resp.get<string>(Keys::success) != SuccessCodes::success) {
             _debug_cerr << "associate failed\n";

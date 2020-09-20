@@ -1,5 +1,6 @@
 #include "GpgAgentHandler.h"
 #include "Log.h"
+#include <boost/asio.hpp>
 #include <sodium.h>
 
 int main(int argc, char **argv) {
@@ -7,7 +8,9 @@ int main(int argc, char **argv) {
         _debug_cerr << "libsodium initialize failed\n";
         exit(-1);
     }
-    KeePassPinentry::GpgAgentHandler handler;
+
+    boost::asio::io_context ctx;
+    KeePassPinentry::GpgAgentHandler handler{ctx};
     handler.serveAgent();
     return 0;
 }

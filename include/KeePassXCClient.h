@@ -16,7 +16,7 @@ namespace KeePassPinentry {
 
 class KeePassXCClient {
   public:
-    using KeyType = vector<unsigned char>;
+    using KeyType = std::vector<unsigned char>;
     KeePassXCClient(boost::asio::io_context &ioContext,
                     std::string identificationKey);
 
@@ -44,10 +44,10 @@ class KeePassXCClient {
     boost::asio::io_context &_ioContext;
     KeyType _publicKey;
     KeyType _privateKey;
-    std::string _clientID;
     KeyType _serverPublicKey;
-    std::string _databaseHash;
-    std::string _identificationKey;
+    std::string _b64ClientID;
+    std::string _b64DatabaseHash;
+    std::string _b64IdentificationKey;
 
 #ifdef _WIN32
 #else
