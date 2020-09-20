@@ -105,6 +105,10 @@ KeePassXCClient::KeePassXCClient(io_context &ioContext,
     handShake();
 }
 
+KeePassXCClient::~KeePassXCClient() {
+    _socket.close();
+}
+
 string KeePassXCClient::getPassphrase(const string &keygrip) {
     ptree resp;
 
@@ -188,8 +192,8 @@ ptree KeePassXCClient::transact_entrypted(const ptree &data) {
     _debug_cerr << "read encrypted data of length " << edata.size() << '\n';
     // increment nonce
     sodium_increment(nonce.data(), nonce.size());
-    string ddata('\0',
-                 max(0, static_cast<int>(edata.size() - crypto_box_MACBYTES)));
+    string ddata(max(0, static_cast<int>(edata.size() - crypto_box_MACBYTES)),
+        '\0');
     if (-1 ==
         crypto_box_open_easy(reinterpret_cast<unsigned char *>(ddata.data()),
                              edata.data(), edata.size(), nonce.data(),
@@ -266,6 +270,18 @@ void KeePassXCClient::associate() {
 void KeePassXCClient::connectSocket() {
     constexpr char socket_name[]{"kpxc_server"};
 #ifdef _WIN32
+    decltype(auto) user_name = getenv("USERNAME");
+    if (!user_name) {
+        _debug_cerr << "cannot find environment variable USERNAME\n";
+        throw runtime_error{ "cannot find environment variable USERNAME" };
+    }
+    string path = string{ "\\\\.\\npipe\\keepassxc\\" } + user_name +'\\'+ socket_name;
+    _npipe = CreateFileA(path.c_str(), GENERIC_ALL, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (_npipe == INVALID_HANDLE_VALUE) {
+        _debug_cerr << "cannot open named pipe\n";
+        throw runtime_error{ "cannot open named pipe" };
+    }
+    _socket.assign(_npipe);
 #else
     const char *xdg = getenv("XDG_RUNTIME_DIR");
     if (xdg)

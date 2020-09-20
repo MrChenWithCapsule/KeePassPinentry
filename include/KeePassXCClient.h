@@ -20,6 +20,8 @@ class KeePassXCClient {
     KeePassXCClient(boost::asio::io_context &ioContext,
                     std::string identificationKey);
 
+    ~KeePassXCClient();
+
     std::string getPassphrase(const std::string &keygrip);
 
     KeyType getPrivateKey();
@@ -50,6 +52,8 @@ class KeePassXCClient {
     std::string _b64IdentificationKey;
 
 #ifdef _WIN32
+    HANDLE _npipe;
+    boost::asio::windows::stream_handle _socket;
 #else
     boost::asio::local::stream_protocol::socket _socket;
 #endif
