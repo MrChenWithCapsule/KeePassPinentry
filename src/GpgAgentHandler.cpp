@@ -65,6 +65,14 @@ bool GpgAgentHandler::handleSetKeyInfo(const string &cmd) {
 bool GpgAgentHandler::handleGetPin(const string &cmd) {
     if (_keygrip.empty())
         return true;
+    if (!_client.isConnected()) {
+        try {
+            _client.connect();
+        } catch (runtime_error &e) {
+            _debug_cerr << "error when connecting server: " << e.what() << '\n';
+            return true;
+        }
+    }
     string p = _client.getPassphrase(_keygrip);
     if (p.empty())
         return true;

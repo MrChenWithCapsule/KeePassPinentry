@@ -1,7 +1,10 @@
 #include "KeePassXCClient.h"
+#include "KeePassXCErrors.h"
 #include "Log.h"
 
 #include <array>
+#include <boost/iostreams/device/array.hpp>
+#include <boost/iostreams/stream.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cstdlib>
@@ -10,10 +13,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 using namespace std;
 using namespace boost::asio;
 using namespace boost::property_tree;
+using namespace boost::iostreams;
 using KeyType = KeePassPinentry::KeePassXCClient::KeyType;
 using DataType = KeyType;
 namespace asio = boost::asio;
@@ -48,6 +53,8 @@ struct Keys {
     static constexpr char hash[] = "hash";
     static constexpr char url[] = "url";
     static constexpr char password[] = "password";
+    static constexpr char errorCode[] = "errorCode";
+    static constexpr char error[] = "error";
 };
 
 struct SuccessCodes {
@@ -56,7 +63,7 @@ struct SuccessCodes {
 };
 
 constexpr auto base64Variant = sodium_base64_VARIANT_ORIGINAL;
-static KeyType base64Decode(const string &str) {
+static KeyType base64Decode(string_view str) {
     KeyType ret(str.length() * 3 / 4);
     size_t sz;
     if (-1 == sodium_base642bin(ret.data(), ret.size(), str.data(),
@@ -67,11 +74,18 @@ static KeyType base64Decode(const string &str) {
     ret.resize(sz);
     return ret;
 }
-static string base64Encode(const KeyType &bytes) {
-    string ret(sodium_base64_ENCODED_LEN(bytes.size(), base64Variant), '\0');
-    sodium_bin2base64(data(ret), ret.length(), bytes.data(), bytes.size(),
+static KeyType base64Decode(const string &str) {
+    return base64Decode(string_view{str.c_str(), str.size()});
+}
+static string base64Encode(const KeyType &data, size_t size) {
+    string ret(sodium_base64_ENCODED_LEN(size, base64Variant), '\0');
+    sodium_bin2base64(ret.data(), ret.length(), data.data(), size,
                       base64Variant);
+    ret.resize(ret.size() - 1);
     return ret;
+}
+static string base64Encode(const KeyType &data) {
+    return base64Encode(data, data.size());
 }
 static KeyType generateNonce() {
     constexpr auto nonceLength = 24U;
@@ -82,12 +96,30 @@ static KeyType generateNonce() {
 }
 static string generateClientID() { return base64Encode(generateNonce()); }
 
+static size_t serialize(const ptree &data, DataType &buf) {
+    stream<array_sink> os{reinterpret_cast<char *>(buf.data()), buf.size()};
+    write_json(os, data);
+    return os.tellp();
+}
+static void deserialize(const DataType &data, size_t sz, ptree &tree) {
+    stream<array_source> is{reinterpret_cast<const char *>(data.data()), sz};
+    read_json(is, tree);
+}
+
 namespace KeePassPinentry {
 KeePassXCClient::KeePassXCClient(io_context &ioContext,
                                  string identificationKey)
-    : _ioContext{ioContext}, _socket{ioContext},
-      _b64IdentificationKey{identificationKey}, _b64ClientID{
-                                                    generateClientID()} {
+    : _ioContext{ioContext}, _socket{ioContext}, _b64IdentificationKey{
+                                                     identificationKey} {}
+
+void KeePassXCClient::connect() {
+    if (_isConnected)
+        return;
+
+    // generate client id
+    _b64ClientID = generateClientID();
+    _debug_cerr << "generated client id: " << _b64ClientID << '\n';
+
     // if I don't have an identification, generate one
     if (_b64IdentificationKey.empty()) {
         KeyType bkey(crypto_box_PUBLICKEYBYTES);
@@ -106,9 +138,9 @@ KeePassXCClient::KeePassXCClient(io_context &ioContext,
     handShake();
 }
 
-KeePassXCClient::~KeePassXCClient() {
-    _socket.close();
-}
+bool KeePassXCClient::isConnected() { return _isConnected; }
+
+KeePassXCClient::~KeePassXCClient() { _socket.close(); }
 
 string KeePassXCClient::getPassphrase(const string &keygrip) {
     ptree resp;
@@ -122,7 +154,7 @@ string KeePassXCClient::getPassphrase(const string &keygrip) {
         key.add(Keys::id, _b64DatabaseHash);
         keys.add_child("", key);
         msg.add_child(Keys::keys, keys);
-        resp = transact_entrypted(msg);
+        resp = transact(msg, true);
     }
 
     if (resp.get<string>(Keys::success) != SuccessCodes::success)
@@ -139,72 +171,53 @@ void KeePassXCClient::handShake() {
     associate();
 }
 
-ptree KeePassXCClient::transact(const ptree &data) {
-    ostringstream oss;
-    write_json(oss, data, false);
-    string s = oss.str();
-    write(_socket, buffer(s));
-    _debug_cerr << "sent data of length " << s.length() << '\n';
+constexpr auto max_message_size = 1048576;
 
-    asio::streambuf buf;
-    read(_socket, buf);
-    _debug_cerr << "read data of length " << buf.size() << '\n';
-    ptree msg;
-    istream sst{ &buf };
-    read_json(sst, msg);
-
-    return msg;
-}
-
-ptree KeePassXCClient::transact_entrypted(const ptree &data) {
-    // construct the data to send
-    ptree box;
-    KeyType nonce = generateNonce();
-    box.add(Keys::action, data.get<string>(Keys::action));
-    box.add(Keys::nonce, base64Encode(nonce));
-    box.add(Keys::clientID, _b64ClientID);
-    {
-        ostringstream sst;
-        write_json(sst, data);
-        string s = sst.str();
-        DataType edata(crypto_box_MACBYTES + s.length());
-        if (0 != crypto_box_easy(edata.data(),
-                                 reinterpret_cast<unsigned char *>(s.data()),
-                                 s.length(), nonce.data(), _privateKey.data(),
-                                 _serverPublicKey.data())) {
+ptree KeePassXCClient::transact(const ptree &data, bool encrypt) {
+    // prepare the buffer to send
+    DataType buf(max_message_size + crypto_box_MACBYTES);
+    auto bufsz = serialize(data, buf);
+    KeyType nonce;
+    if (encrypt) {
+        ptree box;
+        nonce = generateNonce();
+        box.add(Keys::action, data.get<string>(Keys::action));
+        box.add(Keys::nonce, base64Encode(nonce));
+        box.add(Keys::clientID, _b64ClientID);
+        if (0 != crypto_box_easy(buf.data(), buf.data(), bufsz, nonce.data(),
+                                 _serverPublicKey.data(), _privateKey.data())) {
             _debug_cerr << "encryption failed\n";
             throw runtime_error{"encryption failed"};
         }
-        box.add(Keys::message, base64Encode(edata));
+        bufsz += crypto_box_MACBYTES;
+        box.add(Keys::message, base64Encode(buf, bufsz));
+        bufsz = serialize(box, buf);
     }
 
-    // send data
-    {
-        ostringstream sst;
-        write_json(sst, data);
-        string s = sst.str();
-        write(_socket, buffer(s));
-        _debug_cerr << "send encrypted data of length " << s.length() << '\n';
-    }
+    // send and receive data
+    write(_socket, buffer(buf.data(), bufsz));
+    _debug_cerr << "sent data of length " << bufsz << '\n';
+    bufsz = _socket.read_some(buffer(buf));
+    _debug_cerr << "read data of length " << bufsz << '\n';
 
-    // receive end decrypt data
-    asio::streambuf edata;
-    read(_socket, edata);
-    _debug_cerr << "read encrypted data of length " << edata.size() << '\n';
-    // increment nonce
-    sodium_increment(nonce.data(), nonce.size());
-    string ddata(max(0, static_cast<int>(edata.size() - crypto_box_MACBYTES)),
-        '\0');
-    if (-1 ==
-        crypto_box_open_easy(reinterpret_cast<unsigned char *>(ddata.data()),
-                             reinterpret_cast<const unsigned char*>(edata.data().data()), edata.size(), nonce.data(),
-                             _serverPublicKey.data(), _privateKey.data())) {
-        _debug_cerr << "authentication failed\n";
-        throw runtime_error{"authentication failed"};
-    }
-    istringstream sst{ddata};
+    // prepare responce
     ptree ret;
-    read_json(sst, ret);
+    deserialize(buf, bufsz, ret);
+    if (ret.get(Keys::errorCode, 0))
+        throw DatabaseNotOpenedError{};
+    if (encrypt) {
+        auto m = base64Decode(ret.get<string>(Keys::message));
+        sodium_increment(nonce.data(), nonce.size());
+        if (-1 == crypto_box_open_easy(buf.data(), m.data(), m.size(),
+                                       nonce.data(), _serverPublicKey.data(),
+                                       _privateKey.data())) {
+            _debug_cerr << "authentication failed\n";
+            throw runtime_error{"authentication failed"};
+        }
+        bufsz = m.size() - crypto_box_MACBYTES;
+        deserialize(buf, bufsz, ret);
+    }
+
     return ret;
 }
 
@@ -218,7 +231,7 @@ void KeePassXCClient::changePublicKey() {
         msg.add(Keys::publicKey, base64Encode(_publicKey));
         msg.add(Keys::nonce, base64Encode(generateNonce()));
         msg.add(Keys::clientID, _b64ClientID);
-        serverMsg = transact(msg);
+        serverMsg = transact(msg, false);
     }
 
     // receive responce from server and read the public key
@@ -235,7 +248,7 @@ void KeePassXCClient::associate() {
         _debug_cerr << "get database hash\n";
         ptree msg;
         msg.add(Keys::action, Actions::getDatabasehash);
-        ptree resp = transact_entrypted(msg);
+        ptree resp = transact(msg, true);
         _b64DatabaseHash = resp.get<string>(Keys::hash);
     }
 
@@ -246,7 +259,7 @@ void KeePassXCClient::associate() {
         msg.add(Keys::action, Actions::testAssociate);
         msg.add(Keys::id, _b64DatabaseHash);
         msg.add(Keys::key, _b64IdentificationKey);
-        ptree resp = transact_entrypted(msg);
+        ptree resp = transact(msg, true);
         if (resp.get<string>(Keys::success) == SuccessCodes::success) {
             _debug_cerr << "already associated\n";
             return;
@@ -260,7 +273,7 @@ void KeePassXCClient::associate() {
         msg.add(Keys::action, Actions::associate);
         msg.add(Keys::publicKey, base64Encode(_publicKey));
         msg.add(Keys::idKey, _b64IdentificationKey);
-        ptree resp = transact_entrypted(msg);
+        ptree resp = transact(msg, true);
         if (resp.get<string>(Keys::success) != SuccessCodes::success) {
             _debug_cerr << "associate failed\n";
             throw runtime_error{"associate failed\n"};
@@ -274,13 +287,15 @@ void KeePassXCClient::connectSocket() {
     decltype(auto) user_name = getenv("USERNAME");
     if (!user_name) {
         _debug_cerr << "cannot find environment variable USERNAME\n";
-        throw runtime_error{ "cannot find environment variable USERNAME" };
+        throw runtime_error{"cannot find environment variable USERNAME"};
     }
-    string path = string{ "\\\\.\\pipe\\keepassxc\\" } + user_name +'\\'+ socket_name;
-    _npipe = CreateFileA(path.c_str(), GENERIC_ALL, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    string path =
+        string{"\\\\.\\pipe\\keepassxc\\"} + user_name + '\\' + socket_name;
+    _npipe = CreateFileA(path.c_str(), GENERIC_ALL, 0, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_OVERLAPPED, nullptr);
     if (_npipe == INVALID_HANDLE_VALUE) {
         _debug_cerr << "cannot open named pipe\n";
-        throw runtime_error{ "cannot open named pipe" };
+        throw runtime_error{"cannot open named pipe"};
     }
     _socket.assign(_npipe);
 #else

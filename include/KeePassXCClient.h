@@ -22,11 +22,13 @@ class KeePassXCClient {
 
     ~KeePassXCClient();
 
+    void connect();
+
+    bool isConnected();
+
     std::string getPassphrase(const std::string &keygrip);
 
     KeyType getPrivateKey();
-
-    std::set<std::string> getDatabaseHash();
 
   private:
     void connectSocket();
@@ -38,21 +40,20 @@ class KeePassXCClient {
     void associate();
 
     boost::property_tree::ptree
-    transact(const boost::property_tree::ptree &data);
-
-    boost::property_tree::ptree
-    transact_entrypted(const boost::property_tree::ptree &data);
+    transact(const boost::property_tree::ptree &data, bool encrypt);
 
     boost::asio::io_context &_ioContext;
-    KeyType _publicKey;
-    KeyType _privateKey;
-    KeyType _serverPublicKey;
-    std::string _b64ClientID;
-    std::string _b64DatabaseHash;
-    std::string _b64IdentificationKey;
+    bool _isConnected{false};
+
+    KeyType _publicKey{};
+    KeyType _privateKey{};
+    KeyType _serverPublicKey{};
+    std::string _b64ClientID{};
+    std::string _b64DatabaseHash{};
+    std::string _b64IdentificationKey{};
 
 #ifdef _WIN32
-    HANDLE _npipe;
+    HANDLE _npipe{nullptr};
     boost::asio::windows::stream_handle _socket;
 #else
     boost::asio::local::stream_protocol::socket _socket;
