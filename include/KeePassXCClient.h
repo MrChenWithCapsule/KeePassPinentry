@@ -17,14 +17,13 @@ namespace KeePassPinentry {
 class KeePassXCClient {
   public:
     using KeyType = std::vector<unsigned char>;
+
     KeePassXCClient(boost::asio::io_context &ioContext,
-                    std::string identificationKey);
+                    std::string identificationKey = "");
 
     ~KeePassXCClient();
 
     void connect();
-
-    bool isConnected();
 
     std::string getPassphrase(const std::string &keygrip);
 
@@ -40,7 +39,7 @@ class KeePassXCClient {
     void associate();
 
     boost::property_tree::ptree
-    transact(const boost::property_tree::ptree &data, bool encrypt);
+    transact(const boost::property_tree::ptree &data, bool encrypt) noexcept;
 
     boost::asio::io_context &_ioContext;
     bool _isConnected{false};

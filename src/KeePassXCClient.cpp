@@ -1,5 +1,4 @@
 #include "KeePassXCClient.h"
-#include "KeePassXCErrors.h"
 #include "Log.h"
 
 #include <array>
@@ -110,17 +109,24 @@ namespace KeePassPinentry {
 KeePassXCClient::KeePassXCClient(io_context &ioContext,
                                  string identificationKey)
     : _ioContext{ioContext}, _socket{ioContext}, _b64IdentificationKey{
-                                                     identificationKey} {}
+                                                     identificationKey} {
+#ifndef NDEBUG
+    // connect immediately so that I don't have to input
+    connect();
+#endif
+}
 
 void KeePassXCClient::connect() {
     if (_isConnected)
         return;
 
-    // generate client id
-    _b64ClientID = generateClientID();
-    _debug_cerr << "generated client id: " << _b64ClientID << '\n';
+    // generate a client id if I don't have one
+    if (_b64ClientID.empty()) {
+        _b64ClientID = generateClientID();
+        _debug_cerr << "generated client id: " << _b64ClientID << '\n';
+    }
 
-    // if I don't have an identification, generate one
+    // generate a identification key if I don't have one
     if (_b64IdentificationKey.empty()) {
         KeyType bkey(crypto_box_PUBLICKEYBYTES);
         randombytes_buf(bkey.data(), bkey.size());
@@ -128,17 +134,17 @@ void KeePassXCClient::connect() {
         _debug_cerr << "generated identification key\n";
     }
 
-    // generate key pair
-    _privateKey.resize(crypto_kx_SECRETKEYBYTES);
-    _publicKey.resize(crypto_kx_PUBLICKEYBYTES);
-    crypto_kx_keypair(_publicKey.data(), _privateKey.data());
-    _debug_cerr << "generated key pair\n";
+    // also generate a key pair if I don't have one
+    if (_privateKey.empty()) {
+        _privateKey.resize(crypto_kx_SECRETKEYBYTES);
+        _publicKey.resize(crypto_kx_PUBLICKEYBYTES);
+        crypto_kx_keypair(_publicKey.data(), _privateKey.data());
+        _debug_cerr << "generated key pair\n";
+    }
 
     connectSocket();
     handShake();
 }
-
-bool KeePassXCClient::isConnected() { return _isConnected; }
 
 KeePassXCClient::~KeePassXCClient() { _socket.close(); }
 
@@ -157,7 +163,7 @@ string KeePassXCClient::getPassphrase(const string &keygrip) {
         resp = transact(msg, true);
     }
 
-    if (resp.get<string>(Keys::success) != SuccessCodes::success)
+    if (resp.get<string>(Keys::success, SuccessCodes::failed) != SuccessCodes::success)
         return {};
     return resp.get_child(Keys::entries)
         .begin()
@@ -171,10 +177,9 @@ void KeePassXCClient::handShake() {
     associate();
 }
 
-constexpr auto max_message_size = 1048576;
-
-ptree KeePassXCClient::transact(const ptree &data, bool encrypt) {
+ptree KeePassXCClient::transact(const ptree &data, bool encrypt) noexcept {
     // prepare the buffer to send
+    constexpr auto max_message_size = 1048576;
     DataType buf(max_message_size + crypto_box_MACBYTES);
     auto bufsz = serialize(data, buf);
     KeyType nonce;
@@ -203,9 +208,7 @@ ptree KeePassXCClient::transact(const ptree &data, bool encrypt) {
     // prepare responce
     ptree ret;
     deserialize(buf, bufsz, ret);
-    if (ret.get(Keys::errorCode, 0))
-        throw DatabaseNotOpenedError{};
-    if (encrypt) {
+    if (encrypt && !ret.get(Keys::errorCode, 0)) {
         auto m = base64Decode(ret.get<string>(Keys::message));
         sodium_increment(nonce.data(), nonce.size());
         if (-1 == crypto_box_open_easy(buf.data(), m.data(), m.size(),
@@ -260,7 +263,7 @@ void KeePassXCClient::associate() {
         msg.add(Keys::id, _b64DatabaseHash);
         msg.add(Keys::key, _b64IdentificationKey);
         ptree resp = transact(msg, true);
-        if (resp.get<string>(Keys::success) == SuccessCodes::success) {
+        if (resp.get<string>(Keys::success, SuccessCodes::failed) == SuccessCodes::success) {
             _debug_cerr << "already associated\n";
             return;
         }
@@ -271,10 +274,10 @@ void KeePassXCClient::associate() {
         _debug_cerr << "associate\n";
         ptree msg;
         msg.add(Keys::action, Actions::associate);
-        msg.add(Keys::publicKey, base64Encode(_publicKey));
+        msg.add(Keys::key, base64Encode(_publicKey));
         msg.add(Keys::idKey, _b64IdentificationKey);
         ptree resp = transact(msg, true);
-        if (resp.get<string>(Keys::success) != SuccessCodes::success) {
+        if (resp.get<string>(Keys::success, SuccessCodes::failed) != SuccessCodes::success) {
             _debug_cerr << "associate failed\n";
             throw runtime_error{"associate failed\n"};
         }
